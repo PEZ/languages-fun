@@ -1,105 +1,161 @@
-# We run the benchmark with input.txt as arguments
-# unless the script is run with arguments, then those will be used instead
-# With arguments the check will be skipped, unless the only argument is "check"
-# The special argument "check" makes the input always input.txt, and skips the benchmark
+#!/bin/bash
 
-num_script_args="${#}"
-script_args="${*}"
-if [ "${script_args}" = "check" ]; then
-  input=$(cat input.txt)
-else
-  input=${script_args:-$(cat input.txt)}
+benchmark=$(basename "${PWD}")
+
+# Defaults
+check_only=false
+skip_check=false
+run_ms=10000
+cmd_input="$(./check-output.sh -i)"
+user="JDoe"
+only_langs=false
+use_hyperfine=false
+[[ "$benchmark" == "hello-world" ]] && use_hyperfine=true
+
+while getopts "cst:u:l:h" opt; do
+  case $opt in
+    u) user="${OPTARG}" ;;          # Included in result file
+    t) run_ms="${OPTARG}" ;;        # How long should the benchmark run?
+    c) check_only=true ;;           # Skip benchmark
+    s) skip_check=true ;;           # Run benchmark even if check fails (typically with non-default input)
+    l) only_langs="${OPTARG}" ;;    # Languages to benchmark, comma separated
+    *) ;;
+  esac
+done
+shift $((OPTIND-1))
+
+only_langs_slug=""
+if [ -n "${only_langs}" ] && [ "${only_langs}" != "false" ]; then
+    IFS=',' read -r -a only_langs <<< "${only_langs}"
+    only_langs_slug="_only_langs"
 fi
 
+is_checked=true
+if [ "$skip_check" = true ]; then
+  is_checked=false
+fi
+user=${user//,/_}
+input_value="${1}"
+if [ -n "${input_value}" ]; then
+    cmd_input="${input_value}"
+fi
+
+commit_sha=$(git rev-parse --short HEAD)
+timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+benchmark_dir="/tmp/languages-benchmark"
+os=${OSTYPE//,/_}
+arch=$(uname -m)
+
+if [[ "${os}" == "darwin"* || "${os}" == "freebsd"* ]]; then
+    model=$(sysctl -n machdep.cpu.brand_string)
+elif [[ "${os}" == "linux-gnu"* ]]; then
+    model=$(lscpu | grep "Model name" | awk -F: '{print $2}' | sed -e 's/^[[:space:]]*//')
+else
+    model="Unknown"
+fi
+model=${model//,/_}
+
+if [[ "${os}" == "darwin"* || "${os}" == "freebsd"* ]]; then
+  ram=$(sysctl -n hw.memsize)
+  ram=$((ram / 1024 / 1024 / 1024))GB
+elif [[ "${os}" == "linux-gnu"* ]]; then
+  ram=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  ram=$((ram / 1024 / 1024))GB
+else
+  ram="Unknown"
+fi
+
+mkdir -p "${benchmark_dir}"
+results_file_name="${benchmark}_${user}_${run_ms}_${commit_sha}${only_langs_slug}.csv"
+results_file="${benchmark_dir}/${results_file_name}"
+# Data header, must match what is printed from `run`
+if [ "${check_only}" = false ]; then
+  echo "benchmark,timestamp,commit_sha,is_checked,user,model,ram,os,arch,language,run_ms,mean_ms,std-dev-ms,min_ms,max_ms,runs" > "${results_file}"
+  echo "Running ${benchmark} benchmark..."
+  echo "Results will be written to: ${results_file}"
+else
+  echo "Only checking ${benchmark} benchmark"
+  echo "No benchmark will be run"
+fi
+
+
 function check {
-  if [ ${num_script_args} -eq 0 ] || [ "${script_args}" = "check" ]; then
-    echo "Checking $1"
-    output=$(${2} ${3})
-    if ! ./check.sh "$output"; then
-      echo "Check failed for $1."
+  local language_name=${1}
+  local partial_command=${2}
+  local input_arg=${3}
+
+  local command_line
+  local program_output
+
+  if [ ${skip_check} = false ]; then
+    echo "Checking ${benchmark} ${language_name}"
+    command_line="${partial_command} 1 ${input_arg}"
+    program_output=$(${command_line})
+    if ! ./check-output.sh "${program_output}"; then
+      echo "Check failed for ${benchmark} ${language_name}."
       return 1
     fi
+  else
+    echo "Skipping check for ${benchmark} ${language_name}"
   fi
 }
 
 function run {
-  echo ""
-  if [ -f ${2} ]; then
-    check "${1}" "${3}" "${4}"
-    if [ ${?} -eq 0 ] && [ "${script_args}" != "check" ]; then
-      cmd=$(echo "${3} ${4}" | awk '{ if (length($0) > 80) print substr($0, 1, 60) " ..."; else print $0 }')
-      echo "Benchmarking $1"
-      hyperfine -i --shell=none --output=pipe --runs 3 --warmup 2 -n "${cmd}" "${3} ${4}"
+  # "Language" "File that should exist" "Partial command line"
+  local language_name=${1}
+  local file_that_should_exist=${2}
+  local partial_command=${3}
+
+
+  if [ "$only_langs" != false ]; then
+    local should_run=false
+    for lang in "${only_langs[@]}"; do
+      if [ "$lang" = "$language_name" ]; then
+        should_run=true
+        break
+      fi
+    done
+    if [ "$should_run" = false ]; then
+      return
+    fi
+  fi
+
+  local result
+  echo
+  if [ -f "${file_that_should_exist}" ]; then
+    check "${language_name}" "${partial_command}" "${cmd_input}"
+    if [ ${?} -eq 0 ] && [ ${check_only} = false ]; then
+      echo "Benchmarking ${benchmark} ${language_name}"
+      if [ ${use_hyperfine} = true ]; then
+        local command_line="${partial_command} 1 ${cmd_input}"
+        mkdir -p "${benchmark_dir}/hyperfine"
+        hyperfine_file="${benchmark_dir}/hyperfine/${results_file_name}"
+        hyperfine -i --shell=none --output=pipe --runs 25 --warmup 5 --export-csv "${hyperfine_file}" "${command_line}"
+        result=$(tail -n +2 "${hyperfine_file}" | awk -F ',' '{print ($2*1000)","($3*1000)","($7*1000)","($8*1000)","25}')
+      else
+        local command_line="${partial_command} ${run_ms} ${cmd_input}"
+        echo "${command_line}"
+        local program_output=$(eval "${command_line}")
+        result=$(echo "${program_output}" | awk -F ',' '{print $1","$2","$3","$4","$5}')
+      fi
+      echo "${benchmark},${timestamp},${commit_sha},${is_checked},${user},${model},${ram},${os},${arch},${language_name},${run_ms},${result}" | tee -a "${results_file}"
     fi
   else
-    echo "No executable or script found for $1. Skipping."
+    echo "No executable or script found for ${language_name}. Skipping."
   fi
 }
 
-run "Hare" "./hare/code 40"
-# run "Language" "Executable" "Command" "Arguments"
-#run "Ada" "./ada/code" "./ada/code" "${input}"
-#run "AWK" "./awk/code.awk" "awk -f ./awk/code.awk" "${input}"
-#run "Babashka" "bb/code.clj" "bb bb/code.clj" "${input}"
-run "Bun (Compiled)" "./js/bun" "./js/bun" "${input}"
-run "Bun (jitless)" "./js/code.js" "bun ./js/code.js" "BUN_JSC_useJIT=0" "${input}"
-run "Bun" "./js/code.js" "bun ./js/code.js" "${input}"
-run "C3" "./c3/code" "./c3/code" "${input}"
-run "C" "./c/code" "./c/code" "${input}"
-run "C#" "./csharp/code/code" "./csharp/code/code" "${input}"
-run "C# AOT" "./csharp/code-aot/code" "./csharp/code-aot/code" "${input}"
-run "Chez Scheme" "./chez/code.so" "chez --program ./chez/code.so" "${input}"
-run "Clojure" "./clojure/classes/code.class" "java -cp clojure/classes:$(clojure -Spath) code" "${input}"
-run "Clojure Native" "./clojure-native-image/code" "./clojure-native-image/code" "${input}"
-run "COBOL" "./cobol/main" "./cobol/main" "${input}"
-run "Common Lisp" "./common-lisp/code" "sbcl --script common-lisp/code.lisp" "${input}"
-run "CPP" "./cpp/code" "./cpp/code" "${input}"
-run "Crystal" "./crystal/code" "./crystal/code" "${input}"
-#run "D" "./d/code" "./d/code" "${input}"
-run "Dart" "./dart/code" "./dart/code" "${input}"
-run "Deno (jitless)" "./js/code.js" "deno --v8-flags=--jitless ./js/code.js" "${input}"
-run "Deno" "./js/code.js" "deno run ./js/code.js" "${input}"
-run "Elixir" "./elixir/bench.exs" "elixir ./elixir/bench.exs" "${input}"
-run "Emojicode" "./emojicode/code" "./emojicode/code" "${input}"
-run "F#" "./fsharp/code/code" "./fsharp/code/code" "${input}"
-run "F# AOT" "./fsharp/code-aot/code" "./fsharp/code-aot/code" "${input}"
-run "Fortran" "./fortran/code" "./fortran/code" "${input}"
-run "Free Pascal" "./fpc/code" "./fpc/code" "${input}"
-run "Go" "./go/code" "./go/code" "${input}"
-run "Haskell" "./haskell/code" "./haskell/code" "${input}"
-#run "Haxe JVM" "haxe/code.jar" "java -jar haxe/code.jar" "${input}" # was getting errors running `haxelib install hxjava`
-run "Inko" "./inko/code" "./inko/code" "${input}"
-run "Java" "./jvm/code.class" "java jvm.code" "${input}"
-run "Java Native" "./java-native-image/code" "./java-native-image/code" "${input}"
-run "Julia" "./julia/code.jl" "julia ./julia/code.jl" "${input}"
-run "Kotlin JVM" "kotlin/code.jar" "java -jar kotlin/code.jar" "${input}"
-run "Kotlin Native" "./kotlin/code.kexe" "./kotlin/code.kexe" "${input}"
-run "Lua" "./lua/code.lua" "lua ./lua/code.lua" "${input}"
-run "LuaJIT" "./lua/code" "luajit ./lua/code" "${input}"
-#run "MAWK" "./awk/code.awk" "mawk -f ./awk/code.awk" "${input}"
-run "Modula 2" "./modula2/code" "./modula2/code" "${input}"
-run "Nim" "./nim/code" "./nim/code" "${input}"
-run "Node (jitless)" "./js/code.js" "node --jitles ./js/code.js" "${input}"
-run "Node" "./js/code.js" "node ./js/code.js" "${input}"
-run "Objective-C" "./objc/code" "./objc/code" "${input}"
-#run "Octave" "./octave/code.m" "octave ./octave/code.m 40" "${input}"
-run "Odin" "./odin/code" "./odin/code" "${input}"
-run "PHP JIT" "./php/code.php" "php -dopcache.enable_cli=1 -dopcache.jit=on -dopcache.jit_buffer_size=64M ./php/code.php" "${input}"
-run "PHP" "./php/code.php" "php ./php/code.php" "${input}"
-run "PyPy" "./py/code.py" "pypy ./py/code.py" "${input}"
-run "Python" "./py/code.py" "python3.12 ./py/code.py" "${input}"
-run "Python JIT" "./py-jit/code.py" "python3.12 ./py-jit/code.py" "${input}"
-#run "R" "./r/code.R" "Rscript ./r/code.R" "${input}"
-run "Racket" "./racket/code" "./racket/code" "$input"
-run "Ruby YJIT" "./ruby/code.rb" "miniruby --yjit ./ruby/code.rb" "${input}"
-run "Ruby" "./ruby/code.rb" "ruby ./ruby/code.rb" "${input}"
-run "Rust" "./rust/target/release/code" "./rust/target/release/code" "${input}"
-run "Scala" "./scala/code" "./scala/code" "${input}"
-run "Scala-Native" "./scala/code-native" "./scala/code-native" "${input}"
-run "Bun Scala-JS(Compiled)" "./scala/bun" "./scala/bun" "${input}"
-run "Bun Scala-JS" "./scala/code.js" "bun ./scala/code.js" "${input}"
-run "Swift" "./swift/code" "./swift/code" "${input}"
-run "V" "./v/code" "./v/code" "${input}"
-run "Zig" "./zig/code" "./zig/code" "${input}"
-run "Emacs Lisp Bytecode" "./emacs-lisp/code.elc" "emacs -Q --batch --load ./emacs-lisp/code.elc" "${input}"
-run "Emacs Lisp Native" "./emacs-lisp/code.eln" "emacs -Q --batch --load ./emacs-lisp/code.eln" "${input}"
+# Please keep in language name alphabetic order
+# run "Language name" "File that should exist" "Command line"
+####### BEGIN The languages
+run "Babashka" "bb/run.clj" "bb bb/run.clj"
+run "C" "./c/run" "./c/run"
+run "Clojure" "./clojure/classes/run.class" "java -cp clojure/classes:$(clojure -Spath) run"
+run "Clojure Native" "./clojure-native-image/run" "./clojure-native-image/run"
+run "Java" "./jvm/run.class" "java -cp .:../lib/java jvm.run"
+run "Java Native" "./java-native-image/run" "./java-native-image/run"
+####### END The languages
+
+echo
+echo "Done running $(basename ${PWD}) benchmark"
+echo "Results were written to: ${results_file}"
