@@ -1,17 +1,47 @@
 
 # Languages
 
-A repo for collaboratively building small benchmarks to compare languages.
-If you have a suggestion for improvement: PR!
-If you want to add a language: PR!
+Having fun together, learning about programming languages, compilers, interpreters, and toolchains, by way of microbenchmarks.
 
-You are also welcome to add new top-level benchmarks dirs
+> [!NOTE]
+> This project is based on the amazing [Languages](https://github.com/bddicken/languages) project, created by @bddicken. The main difference is that here we have a different [runner](#the-runner), which benchmarks the programs in-process, *removing the influence of start/setup times from the results*. And also, to begin with, much fewer languages! Let's fix that together.
 
-## New runner
+We're learning together here.
 
-There's a new runner system that is supposed to replace the old one. The main goal is to eliminate start times from the benchmarks. The general strategy is that the programs being benchmarked do the benchmarking in-process, and only around the single piece of work that the benchmark is about. So for **fibonacci** only the call to the function calculating the fibonacci sum should be measured. Additionally each program (language) will be allowed the same amount of time to complete the benchmark work (as many times as it can).
+* If you have a suggestion for improvement, want to add a language, a benchmark, fix a bug or typo: Use Discussions, Issues, and PRs. Which one to use depends. But generally for bigger ideas: Discussions -> Issues -> PRs. Use your judgement and we will succeed.
+* Have a question? -> Discussions.
 
-For this, each language will have to have some minimal utility/tooling for running the function-under-benchmark as many times as a timeout allows, plus reporting the measurements and the result. Here are two implementations, that we can regard as being reference:
+## Running the benchmarks
+
+To run benchmarks you need toolchains to run (and often to compile) the programs for the languages you want to benchmark. The scripts are written so that benchmarks are compiled and run for any language for which you have a working toolchain.
+
+The steps are performed in a per-benchmark fashion by doing `cd` to the benchmark directory and then:
+
+1. Compile the programs that need compiling:
+
+   ```
+   $ ./compile.sh
+   ```
+1. Run, providing your GitHub user handle, e.g.:
+
+   ```
+   $ ./run.sh -u PEZ
+   ```
+
+   (This is what we refer to as [The Runner](#the-runner))
+1. Clean build files:
+
+   ```
+   $ ./clean.sh
+   ```
+
+## The Runner
+
+The general strategy for the runner to benchmark only the targeted function is that it is the programs being benchmarked that do the benchmarking in-process. They only measure around the single piece of work that the benchmark is about. So for **fibonacci** only the call to the function calculating `fibonacci(n)` should be measured. For **levenshtein** benchmark a function that collects all pairing distances is measured. This is because we use the sum of the distances for [correctness check](#correctness-check).
+
+Each program (language) will be allowed the same amount of time to complete the benchmark work (as many times as it can).
+
+Because of the above, each language will have to have some minimal utility/tooling for running the function-under-benchmark as many times as a timeout allows, plus reporting the measurements and the result. Here are three implementations, that we can regard as being reference:
 
 * [benchmark.clj](lib/clojure/src/languages/benchmark.clj)
 * [benchmark.java](lib/java/languages/Benchmark.java)
@@ -28,10 +58,10 @@ The benchmark/run function is responsible to report back the result/answer to th
 
 ### Running a benchmark
 
-The new run script is named [run-benchmark.sh](run-benchmark.sh). Let's say we run it in the **levenstein** directory:
+The new run script is named [run.sh](run.sh). Let's say we run it in the **levenstein** directory:
 
 ```sh
-../run-benchmark.sh -u PEZ
+../run.sh -u PEZ
 ```
 
 The default run time is `10000` ms. `-u` sets the user name (preferably your GitHub handle). The output was this:
@@ -52,10 +82,10 @@ It's a CSV file you can open in something Excel-ish, or consume with your favori
 
 As you can see, it has some meta data about the run, in addition to the benchmark results. **Clojure** ran the benchmark 175 times, with a mean time of **57.3 ms**. Which shows the point with the new runner, considering that Clojure takes **300 ms** (on the same machine) to start.
 
-See [run-benchmark.sh](run-benchmark.sh) for some more command line options it accepts. Let's note one of them: `-l` which takes a string of comma separated language names, and only those languages will be run. Good for when contributing a new language or updates to a language. E.g:
+See [run.sh](run.sh) for some more command line options it accepts. Let's note one of them: `-l` which takes a string of comma separated language names, and only those languages will be run. Good for when contributing a new language or updates to a language. E.g:
 
 ```
-~/Projects/languages/levenshtein ❯ ../run-benchmark.sh -u PEZ -l Clojure
+~/Projects/languages/levenshtein ❯ ../run.sh -u PEZ -l Clojure
 Running levenshtein benchmark...
 Results will be written to: /tmp/languages-benchmark/levenshtein_PEZ_10000_5bb1995_only_langs.csv
 
@@ -71,10 +101,10 @@ Results were written to: /tmp/languages-benchmark/levenshtein_PEZ_10000_5bb1995_
 
 ### Compiling a benchmark
 
-This works as before, but since the new programs are named `run` instead of `code`, we need a new script. Meet: [compile-benchmark.sh](compile-benchmark.sh)
+This works as before, but since the new programs are named `run` instead of `code`, we need a new script. Meet: [compile.sh](compile.sh)
 
 ```sh
-../compile-benchmark.sh
+../compile.sh
 ```
 
 ### Adding a language
@@ -83,9 +113,10 @@ To add a language for a benchmark to the new runner you'll need to add:
 
 1. A benchmarking utility in `lib/<language>`
 1. Code in `<benchmark>/<language>/run.<language-extension>` (plus whatever extra project files)
-1. An entry in `compile-benchmark.sh`
-1. An entry in `run-benchmark.sh`
+1. An entry in `compile.sh`
+1. An entry in `run.sh`
 1. Maybe some code in `clean.sh`
+1. Maybe some entries in `.gitignore` (All build files, and temporary toolchain files should be added here.)
 
 The `main` function of the program provided should take two arguments:
 
@@ -101,7 +132,9 @@ The program should output a csv row with:
 mean_ms,std-dev-ms,min_ms,max_ms,times,result
 ```
 
-### Some changes to the benchmarks:
+### Differences from the benchmarks in the Languages project:
+
+When adapting a language implementation of some benchmark, consider these differences
 
 * **fibonacci**: 
   * The program should return the result of `fib(n)`. This is to keep the benchmark focused on one thing.
@@ -113,8 +146,7 @@ mean_ms,std-dev-ms,min_ms,max_ms,times,result
   1. We only calculate each word pairing distance once (A is as far from B as B is from A)
   1. There is a single result, the sum of the distances.
 * **hello-world**: No changes.
-  * It needs to accept and ignore the two arguments
-  * There is no benchmarking code in there, because it will be benchmarked out-of-process, using **hyperfine**
+  * It needs to accept and ignore the two arguments (There is no benchmarking code in there, because it will be benchmarked out-of-process, using **hyperfine**)
 
 Let's look at the `-main` function for the Clojure **levenshtein** contribution:
 
@@ -150,58 +182,6 @@ Please consider helping us making a speedy transition by porting your favorite l
 
 ## Corresponding visuals
 
-Several visuals have been published based on the work here.
-More will likely be added in the future, as this repository improves:
+Here's a visualization of a run using the languages contributed as of January 23, 2024
 
-- https://benjdd.com/languages
-- https://benjdd.com/languages2
-- https://benjdd.com/languages3
-- https://pez.github.io/languages-visualizations/ 
-  - check https://github.com/PEZ/languages-visualizations/tags for tags, which correspond to a snapshot of some particular benchmark run: e.g:
-  - https://pez.github.io/languages-visualizations/v2024.12.31/
-
-## Running (Legacy)
-
-To run one of the benchmarks:
-
-1. `cd` into desired benchmark directory (EG `$ cd loops`)
-2. Compile by running `$ ../compile.sh`
-3. Run via `$ ../run.sh`.
-  You should see output something like:
-  
-  ```
-  $ ../run.sh
-
-  Benchmarking Zig
-  Benchmark 1: ./zig/code 40
-    Time (mean ± σ):     513.9 ms ±   2.9 ms    [User: 504.5 ms, System: 2.6 ms]
-    Range (min … max):   510.6 ms … 516.2 ms    3 runs
-
-
-  Benchmarking C
-  Benchmark 1: ./c/code 40
-    Time (mean ± σ):     514.0 ms ±   1.1 ms    [User: 505.6 ms, System: 2.8 ms]
-    Range (min … max):   513.2 ms … 515.2 ms    3 runs
-
-
-  Benchmarking Rust
-  Benchmark 1: ./rust/target/release/code 40
-    Time (mean ± σ):     514.1 ms ±   2.0 ms    [User: 504.6 ms, System: 3.1 ms]
-    Range (min … max):   512.4 ms … 516.3 ms    3 runs
-
-  ...
-  ```
-
-4. For good measure, execute `$ ../clean.sh` when finished.
-
-Hyperfine is used to warm, execute, and time the runs of the programs.
-
-## Adding (Legacy)
-
-To add a language:
-
-1. Select the benchmark directory you want to add to (EG `$ cd loops`)
-2. Create a new subdirectory for the language (EG `$ mkdir rust`)
-3. Implement the code in the appropriately named file (EG: `code.rs`)
-4. If the language is compiled, add appropriate command to `../compile.sh` and `../clean.sh`
-5. Add appropriate line to `../run.sh`
+- https://pez.github.io/languages-visualizations/#https://gist.github.com/PEZ/411e2da1af3bbe21c4ad1d626451ec1d
